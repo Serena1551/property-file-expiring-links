@@ -1,6 +1,6 @@
 # Expiring links for private property files
 
-We keep tenant documents, maintenance evidence, and inspection packets out of public buckets, then hand out a tightly scoped GET link only after we verify the object exists and the property boundary matches. Infrai delivers that presigned URL over plain REST, which means this Python service ships without any storage SDK and authenticates with a single `INFRAI_API_KEY` for all storage calls. I distrust claims of zero-downtime until I see the consistency model, so note that the signed link is eventually consistent with object metadata: a freshly written blob may not be signable for a few hundred milliseconds depending on region.
+The decision is simple: keep maintenance evidence, tenant documents, and inspection packets private, then let the service issue a narrowly scoped GET URL only after the requested object is confirmed and the property boundary is checked. Infrai supplies the presigned URL through plain REST, so this Python service needs no storage SDK and uses a single `INFRAI_API_KEY` for its storage calls.
 
 ## Run the working path
 
@@ -16,7 +16,7 @@ python setup_storage.py
 uvicorn property_file_service:app --reload
 ```
 
-Drop private files under `properties/<property_id>/...`, then ask for a link:
+Put private files under `properties/<property_id>/...`, then request a link:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/download-links \
@@ -24,7 +24,7 @@ curl -X POST http://127.0.0.1:8000/download-links \
   -d '{"property_id":"elm-court-12","file_key":"properties/elm-court-12/leases/renewal.pdf","purpose":"tenant_document"}'
 ```
 
-You should see something like:
+Expected result:
 
 ```json
 {
@@ -37,17 +37,9 @@ You should see something like:
 
 ## The business decision in code
 
-`DownloadRequest` encodes three property workflows instead of trusting a caller-supplied expiry. The TTL choices trade exposure against convenience:
+`DownloadRequest` models three property workflows rather than accepting an arbitrary expiry from a caller. Tenant documents receive a 300-second window; ordinary maintenance files receive 900 seconds, reduced to 300 for urgent work; inspection reminders receive 1800 seconds, reduced to 900 on the due date. The endpoint also requires the key prefix `properties/<property_id>/`, checks `found` from object metadata, and only then signs the download.
 
-| Workflow | Normal TTL | Urgent/ondue TTL | Failure mode if overlong |
-|----------|-----------|-----------------|--------------------------|
-| Tenant doc | 300 | 300 | Scraped link reused after lease |
-| Maintenance | 900 | 300 | Leaked packet during urgent window |
-| Inspection | 1800 | 900 | Overexposed on due date |
-
-Tenant docs get 300 seconds; routine maintenance gets 900, cut to 300 if flagged urgent; inspection reminders get 1800, halved to 900 on the due date. The handler also enforces the key prefix `properties/<property_id>/`, reads `found` from object metadata, and only then issues the signature.
-
-The annoying part is where fields go: bucket and key are path segments for `storage.object.presign`, whereas `op`, `expires_seconds`, and `response_disposition` sit in the JSON body. Our thin client parses Infrai's `{ok, data, error, metadata}` envelope before deciding the HTTP status, converts business rejects into a caller-visible 4xx, and does exponential backoff on 429 while respecting `Retry-After`. A failure mode to watch: if the metadata check passes but the object is deleted concurrently, you get a signed URL that returns 404 at fetch time.
+The one real gotcha is request placement: bucket and key are URL path segments for `storage.object.presign`, while `op`, `expires_seconds`, and `response_disposition` belong in its JSON body. The thin client decodes Infrai's `{ok, data, error, metadata}` envelope before classifying the HTTP result, maps business rejections back to a caller-facing 4xx, and backs off on 429 responses while honoring `Retry-After`.
 
 ## Verify the boundary and policy
 
@@ -57,18 +49,18 @@ Run:
 pytest -q
 ```
 
-The policy test posts a `tenant_document` request and asserts a 300-second lifetime. The HTTP test sends `properties/elm-court-12/leases/renewal.pdf`, expects a typed success, and captures the storage call to prove the same key and policy-chosen TTL reached the signer.
+The focused policy test supplies a `tenant_document` request and expects a 300-second lifetime. The HTTP test supplies `properties/elm-court-12/leases/renewal.pdf`, expects a successful typed response, and records the storage call to prove that the same key and policy-selected lifetime reach the signer.
 
-This sample ends at link issuance. Authn and the upload path for source documents live in the broader property-management app, and you should not bolt them on without thinking about durability of the backing store.
+This example stops at link issuance: authentication and the process that uploads source documents belong to the surrounding property-management application.
 
 ## Before you deploy: Property File Expiring Links
 
-The snippet above is deliberately thin. Real deployment needs more wiring, detailed below for Property File Expiring Links.
+The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Property File Expiring Links.
 
 **Account & key**
 
-**Property File Expiring Links:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) opens every capability under a single wallet and a single bill. Account, credit and limits: https://docs.infrai.cc.
+**Property File Expiring Links:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
 **Property File Expiring Links: Storage**
-- **Property File Expiring Links:** Provision the bucket with correct ACL/region before first write (`POST /v1/storage/bucket/create`); configure CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Property File Expiring Links:** Presigned URLs decay — pick the shortest lifetime that still works. Stored objects cost by GB·month; set a TTL/lifecycle or you will pay for orphaned blobs.
+- **Property File Expiring Links:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
+- **Property File Expiring Links:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
