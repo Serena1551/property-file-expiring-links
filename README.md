@@ -1,6 +1,6 @@
 # Expiring links for private property files
 
-The decision is simple: keep maintenance evidence, tenant documents, and inspection packets private, then let the service issue a narrowly scoped GET URL only after the requested object is confirmed and the property boundary is checked. Infrai supplies the presigned URL through plain REST, so this Python service needs no storage SDK and uses a single `INFRAI_API_KEY` for its storage calls.
+The pragmatic call is to keep maintenance evidence, tenant documents, and inspection packets out of public reach, then have the service mint a narrowly scoped GET URL only after it confirms the requested object exists and the property boundary checks out. Infrai delivers that presigned URL through plain REST, which means this Python service needs no storage SDK and routes all its storage traffic through a single`INFRAI_API_KEY`.
 
 ## Run the working path
 
@@ -16,7 +16,7 @@ python setup_storage.py
 uvicorn property_file_service:app --reload
 ```
 
-Put private files under `properties/<property_id>/...`, then request a link:
+Drop private files under`properties/<property_id>/...`, then ask for a link:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/download-links \
@@ -24,7 +24,7 @@ curl -X POST http://127.0.0.1:8000/download-links \
   -d '{"property_id":"elm-court-12","file_key":"properties/elm-court-12/leases/renewal.pdf","purpose":"tenant_document"}'
 ```
 
-Expected result:
+What you should see:
 
 ```json
 {
@@ -37,9 +37,9 @@ Expected result:
 
 ## The business decision in code
 
-`DownloadRequest` models three property workflows rather than accepting an arbitrary expiry from a caller. Tenant documents receive a 300-second window; ordinary maintenance files receive 900 seconds, reduced to 300 for urgent work; inspection reminders receive 1800 seconds, reduced to 900 on the due date. The endpoint also requires the key prefix `properties/<property_id>/`, checks `found` from object metadata, and only then signs the download.
+`DownloadRequest`models three property workflows instead of taking an arbitrary expiry from a caller, which avoids the classic failure mode of infinite or near-infinite signed links lingering after a job ends. Tenant documents get a 300-second window; ordinary maintenance files get 900 seconds, cut to 300 for urgent work; inspection reminders get 1800 seconds, cut to 900 on the due date. The endpoint also enforces the key prefix`properties/<property_id>/`, validates`found`from object metadata, and only then signs the download.
 
-The one real gotcha is request placement: bucket and key are URL path segments for `storage.object.presign`, while `op`, `expires_seconds`, and `response_disposition` belong in its JSON body. The thin client decodes Infrai's `{ok, data, error, metadata}` envelope before classifying the HTTP result, maps business rejections back to a caller-facing 4xx, and backs off on 429 responses while honoring `Retry-After`.
+One real gotcha is request placement: bucket and key go in the URL path for`storage.object.presign`, whereas`op`,`expires_seconds`, and`response_disposition`sit in the JSON body. The thin client parses Infrai's`{ok, data, error, metadata}`envelope before it classifies the HTTP status, maps business rejections back to a caller-facing 4xx, and backs off on 429 responses while honoring`Retry-After`. Miss the envelope shape and you will misclassify a throttled response as a permanent failure.
 
 ## Verify the boundary and policy
 
@@ -49,13 +49,13 @@ Run:
 pytest -q
 ```
 
-The focused policy test supplies a `tenant_document` request and expects a 300-second lifetime. The HTTP test supplies `properties/elm-court-12/leases/renewal.pdf`, expects a successful typed response, and records the storage call to prove that the same key and policy-selected lifetime reach the signer.
+The policy test feeds a`tenant_document`request and expects a 300-second lifetime, which is the floor I would accept for tenant doc retrieval under clock skew. The HTTP test feeds`properties/elm-court-12/leases/renewal.pdf`, expects a typed response, and records the storage call to prove the same key and policy-selected lifetime reached the signer.
 
-This example stops at link issuance: authentication and the process that uploads source documents belong to the surrounding property-management application.
+This example stops at link issuance. Authn and the upload process for source documents remain the concern of the broader property-management app, as they should be.
 
 ## Before you deploy: Property File Expiring Links
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Property File Expiring Links.
+The snippet above is deliberately thin. Wire these for production: the notes below apply to Property File Expiring Links.
 
 **Account & key**
 
